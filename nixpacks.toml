@@ -1,2 +1,33 @@
 [phases.setup]
-cmds = ["python -m pip install -r requirements.txt", "python -m playwright install chromium"]
+nixPkgs = [
+  "python311",
+  "python311Packages.pip",
+  "nss",
+  "nspr",
+  "atk",
+  "at-spi2-atk",
+  "cups",
+  "dbus",
+  "drm",
+  "expat",
+  "libxkbcommon",
+  "xorg.libXcomposite",
+  "xorg.libXdamage",
+  "xorg.libXfixes",
+  "xorg.libXrandr",
+  "mesa",
+  "gtk3",
+  "pango",
+  "cairo",
+  "alsa-lib"
+]
+
+[phases.install]
+cmds = [
+  "python -m pip install --upgrade pip",
+  "python -m pip install -r requirements.txt",
+  "python -m playwright install chromium"
+]
+
+[start]
+cmd = "python is_ilani_takip.py"
