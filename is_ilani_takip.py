@@ -15,6 +15,7 @@ from email.mime.multipart import MIMEMultipart
 import hashlib
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urljoin
@@ -215,7 +216,7 @@ class IsIlaniTakip:
         print(f"İstek hatası: {son_hata}")
         return None
 
-    def yotspot_sayfa_cek_browser(self, url):
+    def yotspot_sayfa_cek_browser(self, url, browser_kurulum_denendi=False):
         """Yotspot'u gerçek tarayıcı motoruyla açıp HTML al."""
         if not self.config.get('browser_fallback', True):
             return None
@@ -250,8 +251,33 @@ class IsIlaniTakip:
             print(f"Tarayıcı fallback zaman aşımına uğradı: {e}")
             return None
         except Exception as e:
+            hata_metni = str(e)
+            if (
+                not browser_kurulum_denendi
+                and (
+                    "playwright install" in hata_metni
+                    or "Executable doesn't exist" in hata_metni
+                    or "just installed or updated" in hata_metni
+                )
+            ):
+                print("Chromium bulunamadı; Railway runtime içinde Playwright Chromium kurulumu deneniyor...")
+                if self.playwright_chromium_kur():
+                    return self.yotspot_sayfa_cek_browser(url, browser_kurulum_denendi=True)
+
             print(f"Tarayıcı fallback hatası: {e}")
             return None
+
+    def playwright_chromium_kur(self):
+        """Playwright Chromium tarayıcısını runtime'da kurmayı dene."""
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=True
+            )
+            return True
+        except Exception as e:
+            print(f"Playwright Chromium kurulamadı: {e}")
+            return False
 
     def yotspot_filtreleri_browserda_uygula(self, page):
         """Yotspot arayüzünde mümkünse sort ve filtreleri uygula."""
