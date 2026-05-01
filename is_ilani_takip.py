@@ -15,6 +15,8 @@ from email.mime.multipart import MIMEMultipart
 import hashlib
 import os
 import re
+import sys
+from pathlib import Path
 from urllib.parse import urljoin
 
 class IsIlaniTakip:
@@ -53,16 +55,19 @@ class IsIlaniTakip:
             # Varsayılan yapılandırma
             default_config = {
                 "site_url": "https://www.yotspot.com/job-search.html",
+                "browser_fallback": True,
                 "kontrol_araligi": 600,  # 10 dakika
                 "http_timeout": 45,
                 "istek_tekrar_sayisi": 3,
                 "istek_tekrar_bekleme": 15,
-                "maksimum_ilan": 20,
+                "maksimum_ilan": 15,
                 "maksimum_sayfa": 1,
+                "siralama": "date_added_latest_first",
                 "email": {
                     "aktif": True
                 },
                 "arama_kriterleri": {
+                    "departmanlar": ["Deck"],
                     "pozisyonlar": ["Deckhand", "Junior Deckhand"],
                     "tam_pozisyon_eslesmesi": True,
                     "anahtar_kelimeler": ["deckhand"],
@@ -141,6 +146,7 @@ class IsIlaniTakip:
             if soup is None:
                 return None if not ilanlar else ilanlar
 
+            ham_kart_sayisi = self.yotspot_ham_ilan_karti_say(soup)
             sayfa_ilanlari = self.yotspot_ilanlarini_parse_et(soup)
             yeni_sayfa_ilanlari = 0
 
@@ -153,13 +159,35 @@ class IsIlaniTakip:
                 yeni_sayfa_ilanlari += 1
 
                 if len(ilanlar) >= maksimum_ilan:
-                    return ilanlar
+                    return self.ilanlari_sirala(ilanlar)
 
-                    print(f"  Sayfa {sayfa_no}: {yeni_sayfa_ilanlari} aday ilan kontrol edildi")
+            print(f"  Sayfa {sayfa_no}: {ham_kart_sayisi} ham kart, {yeni_sayfa_ilanlari} filtreye uyan aday ilan")
 
             url = self.sonraki_sayfa_linki_bul(soup, url)
 
-        return ilanlar
+        return self.ilanlari_sirala(ilanlar)
+
+    def ilanlari_sirala(self, ilanlar):
+        """İlanları config'teki sıralama tercihine göre düzenle."""
+        if self.config.get('siralama') != 'date_added_latest_first':
+            return ilanlar
+
+        return sorted(
+            ilanlar,
+            key=lambda ilan: int(ilan.get('ilan_no') or 0),
+            reverse=True
+        )
+
+    def yotspot_ham_ilan_karti_say(self, soup):
+        """Sayfadaki View Job butonu sayısını yaklaşık ham ilan kartı olarak say."""
+        sayac = 0
+
+        for link_elemani in soup.find_all('a', href=True):
+            link_metni = link_elemani.get_text(" ", strip=True)
+            if re.search(r'\bView Job\b', link_metni, re.I):
+                sayac += 1
+
+        return sayac
 
     def yotspot_sayfa_cek(self, session, headers, url, sayfa_no):
         """Tek bir Yotspot sonuç sayfasını retry ile çek."""
@@ -171,6 +199,10 @@ class IsIlaniTakip:
         for deneme in range(1, tekrar_sayisi + 1):
             try:
                 response = session.get(url, headers=headers, timeout=timeout)
+                if response.status_code == 403:
+                    print("Yotspot HTTP isteğini engelledi (403 Forbidden). Tarayıcı fallback deneniyor...")
+                    return self.yotspot_sayfa_cek_browser(url)
+
                 response.raise_for_status()
                 return BeautifulSoup(response.content, 'html.parser')
             except requests.RequestException as e:
@@ -182,6 +214,67 @@ class IsIlaniTakip:
 
         print(f"İstek hatası: {son_hata}")
         return None
+
+    def yotspot_sayfa_cek_browser(self, url):
+        """Yotspot'u gerçek tarayıcı motoruyla açıp HTML al."""
+        if not self.config.get('browser_fallback', True):
+            return None
+
+        try:
+            from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+        except ImportError:
+            print("Playwright kurulu değil. Çalıştırın: pip install -r requirements.txt && python -m playwright install chromium")
+            return None
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page(
+                    viewport={'width': 1440, 'height': 1100},
+                    user_agent=(
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                        'AppleWebKit/537.36 (KHTML, like Gecko) '
+                        'Chrome/124.0 Safari/537.36'
+                    )
+                )
+
+                page.goto(url, wait_until='domcontentloaded', timeout=60000)
+                self.yotspot_filtreleri_browserda_uygula(page)
+                page.wait_for_timeout(3000)
+                html = page.content()
+                browser.close()
+
+                return BeautifulSoup(html, 'html.parser')
+
+        except PlaywrightTimeoutError as e:
+            print(f"Tarayıcı fallback zaman aşımına uğradı: {e}")
+            return None
+        except Exception as e:
+            print(f"Tarayıcı fallback hatası: {e}")
+            return None
+
+    def yotspot_filtreleri_browserda_uygula(self, page):
+        """Yotspot arayüzünde mümkünse sort ve filtreleri uygula."""
+        try:
+            page.get_by_text("Sort", exact=False).click(timeout=5000)
+            page.get_by_text("Date Added (Latest First)", exact=True).click(timeout=5000)
+        except Exception:
+            pass
+
+        kriterler = self.config.get('arama_kriterleri', {})
+
+        try:
+            page.get_by_text("Department", exact=True).click(timeout=5000)
+            page.get_by_text("Deck", exact=True).click(timeout=5000)
+        except Exception:
+            pass
+
+        for pozisyon in kriterler.get('pozisyonlar', []):
+            try:
+                page.get_by_text("Position", exact=True).click(timeout=5000)
+                page.get_by_text(pozisyon, exact=True).click(timeout=5000)
+            except Exception:
+                pass
 
     def sonraki_sayfa_linki_bul(self, soup, mevcut_url):
         """Yotspot sayfalamasındaki Next linkini bul."""
@@ -235,7 +328,11 @@ class IsIlaniTakip:
                 break
 
             metin = parent.get_text(" ", strip=True)
-            if 40 <= len(metin) <= 1800 and re.search(r'Posted|Starting|Permanent|Seasonal|Daywork', metin, re.I):
+            view_job_var = re.search(r'\bView Job\b', metin, re.I)
+            ilan_no_var = re.search(r'#\d+', metin)
+            ilan_detayi_var = re.search(r'Posted|Starting|Permanent|Seasonal|Daywork|Rotational|Temporary', metin, re.I)
+
+            if 25 <= len(metin) <= 2200 and view_job_var and (ilan_no_var or ilan_detayi_var):
                 return parent
 
         return None
@@ -258,9 +355,10 @@ class IsIlaniTakip:
 
         link = urljoin(self.config['site_url'], href)
         ilan_no = self.ilan_numarasi_bul(" ".join(satirlar + [href]))
+        pozisyon_adi = self.pozisyon_adi_temizle(baslik)
         detaylar = [
             satir for satir in satirlar
-            if self.yotspot_baslik_temizle(satir) != baslik
+            if not self.yotspot_detaydan_cikar(satir, baslik, pozisyon_adi)
         ][:8]
         konum = self.yotspot_konum_bul(detaylar)
         yayin_tarihi = next((satir for satir in detaylar if satir.lower().startswith('posted')), '')
@@ -278,7 +376,12 @@ class IsIlaniTakip:
 
     def yotspot_baslik_bul(self, satirlar):
         """Yotspot kartındaki pozisyon başlığını bul ve etiketleri temizle."""
-        for satir in satirlar:
+        for index, satir in enumerate(satirlar):
+            if re.fullmatch(r'#\d+', satir):
+                pozisyon = self.onceki_pozisyon_satirini_bul(satirlar, index)
+                if pozisyon:
+                    return f"{pozisyon} {satir}"
+
             if re.search(r'#\d+', satir):
                 return self.yotspot_baslik_temizle(satir)
 
@@ -289,9 +392,42 @@ class IsIlaniTakip:
 
         return ''
 
+    def onceki_pozisyon_satirini_bul(self, satirlar, index):
+        """Ayrı gelen ilan numarasından önceki pozisyon satırını bul."""
+        for aday in reversed(satirlar[:index]):
+            temiz_aday = self.yotspot_baslik_temizle(aday)
+            aday_lower = temiz_aday.lower()
+
+            if not temiz_aday or aday_lower in {'view job', 'apply', 'save'}:
+                continue
+            if re.fullmatch(r'#\d+', temiz_aday):
+                continue
+            if aday_lower.startswith(('starting ', 'posted ')):
+                continue
+            if re.search(r'permanent|seasonal|daywork|rotational|temporary|motor yacht|sailing yacht|support vessel', aday_lower):
+                continue
+
+            return temiz_aday
+
+        return ''
+
     def yotspot_baslik_temizle(self, metin):
         """Yotspot başlığındaki rozet metinlerini temizle."""
         return re.sub(r'^(Featured|New|Updated)\s+', '', metin, flags=re.I).strip()
+
+    def yotspot_detaydan_cikar(self, satir, baslik, pozisyon_adi):
+        """Başlık/rozet/ilan numarası satırlarını detay listesinden çıkar."""
+        temiz_satir = self.yotspot_baslik_temizle(satir)
+        temiz_lower = temiz_satir.lower()
+
+        if temiz_lower in {'new', 'featured', 'updated', 'view job', 'apply', 'save'}:
+            return True
+        if temiz_satir == baslik or temiz_satir == pozisyon_adi:
+            return True
+        if re.fullmatch(r'#\d+', temiz_satir):
+            return True
+
+        return False
 
     def ilan_numarasi_bul(self, metin):
         """Yotspot ilan numarasını bul."""
@@ -308,6 +444,8 @@ class IsIlaniTakip:
 
         for detay in detaylar:
             detay_lower = detay.lower()
+            if detay_lower in {'new', 'featured', 'updated'}:
+                continue
             if detay_lower.startswith(engellenen):
                 continue
             if any(para in detay_lower for para in para_birimleri):
@@ -440,7 +578,10 @@ class IsIlaniTakip:
         print("🚀 İş İlanı Takip Sistemi Başlatıldı")
         print(f"📍 Site: {self.config['site_url']}")
         print(f"⏱️  Kontrol Aralığı: {self.config['kontrol_araligi']} saniye")
-        print(f"🔍 Anahtar Kelimeler: {self.config['arama_kriterleri']['anahtar_kelimeler']}")
+        kriterler = self.config.get('arama_kriterleri', {})
+        print(f"🧭 Departman: {kriterler.get('departmanlar', [])}")
+        print(f"🔍 Pozisyonlar: {kriterler.get('pozisyonlar', [])}")
+        print(f"🎯 Tam Pozisyon Eşleşmesi: {kriterler.get('tam_pozisyon_eslesmesi', False)}")
         print("-" * 50)
         
         while True:
@@ -490,7 +631,43 @@ class IsIlaniTakip:
                 print(f"❌ Hata oluştu: {e}")
                 time.sleep(60)  # Hata durumunda 1 dakika bekle
 
+    def test_et(self):
+        """Tek seferlik güvenli test: mail göndermez, kayıt dosyasını değiştirmez."""
+        print("🧪 Test modu: mail gönderilmeyecek, görülen ilan kaydı değişmeyecek")
+        print(f"📍 Site: {self.config['site_url']}")
+        kriterler = self.config.get('arama_kriterleri', {})
+        print(f"🧭 Departman: {kriterler.get('departmanlar', [])}")
+        print(f"🔍 Pozisyonlar: {kriterler.get('pozisyonlar', [])}")
+        print(f"↕️  Sıralama: {self.config.get('siralama', '-')}")
+        print("-" * 50)
+
+        ilanlar = self.ilanlari_cek()
+
+        if ilanlar is None:
+            print("❌ Test başarısız: Yotspot bağlantısı kurulamadı")
+            return
+
+        print(f"📋 Filtre sonrası aday ilan sayısı: {len(ilanlar)}")
+
+        yeni_ilanlar = [ilan for ilan in ilanlar if self.yeni_ilan_mi(ilan)]
+        print(f"🆕 Bu adayların yeni olanları: {len(yeni_ilanlar)}")
+
+        if not ilanlar:
+            return
+
+        print("\nİlk aday ilanlar:")
+        for index, ilan in enumerate(ilanlar[:15], start=1):
+            yeni_mi = "YENİ" if self.yeni_ilan_mi(ilan) else "görülmüş"
+            print(
+                f"{index}. {ilan.get('baslik', '-')} | "
+                f"No: {ilan.get('ilan_no', '-') or '-'} | "
+                f"Konum: {ilan.get('konum', '-') or '-'} | {yeni_mi}"
+            )
+
 
 if __name__ == "__main__":
     takip = IsIlaniTakip()
-    takip.calistir()
+    if "--test" in sys.argv:
+        takip.test_et()
+    else:
+        takip.calistir()

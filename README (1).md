@@ -50,6 +50,7 @@ Python 3.10+ kurulu olmalı.
 
 ```bash
 pip install -r requirements.txt
+python -m playwright install chromium
 ```
 
 Çalıştırma:
@@ -65,16 +66,19 @@ python is_ilani_takip.py
 ```json
 {
   "site_url": "https://www.yotspot.com/job-search.html",
+  "browser_fallback": true,
   "kontrol_araligi": 600,
   "http_timeout": 45,
   "istek_tekrar_sayisi": 3,
   "istek_tekrar_bekleme": 15,
-  "maksimum_ilan": 20,
+  "maksimum_ilan": 15,
   "maksimum_sayfa": 1,
+  "siralama": "date_added_latest_first",
   "email": {
     "aktif": true
   },
   "arama_kriterleri": {
+    "departmanlar": ["Deck"],
     "pozisyonlar": ["Deckhand", "Junior Deckhand"],
     "tam_pozisyon_eslesmesi": true,
     "anahtar_kelimeler": ["deckhand"],
@@ -94,7 +98,11 @@ Tüm lokasyonları almak için `konumlar` boş kalmalı.
 
 `http_timeout`, Yotspot'un cevap vermesi için beklenecek saniyedir. `istek_tekrar_sayisi` ve `istek_tekrar_bekleme`, geçici bağlantı hatalarında aynı kontrol içinde tekrar deneme yapmak için kullanılır.
 
-Yotspot filtreleri ayrı bir HTML sayfası açmadığı için `site_url` genel iş sayfasıdır. Program varsayılan olarak ilk sayfadaki en güncel ilanları kontrol eder. `maksimum_sayfa` değerini artırırsan eski sayfalara da bakar, ama günlük bildirim için genelde ilk sayfa yeterlidir.
+Yotspot filtreleri ayrı bir HTML sayfası açmadığı için `site_url` genel iş sayfasıdır. Program varsayılan olarak ilk sayfadaki en güncel ilanları kontrol eder. `maksimum_ilan` değeri ilk kontrolde en fazla kaç aday ilan alınacağını belirler; Yotspot arayüzündeki ilk sayfaya denk gelmesi için 15 tutulur.
+
+`siralama` değeri `date_added_latest_first` iken program aday ilanları Yotspot ilan numarasına göre yeniden sıralar. Yotspot'ta yeni ilan numaraları daha büyük olduğu için bu, "Date Added (Latest First)" mantığına denk gelir.
+
+`browser_fallback` açıkken Yotspot normal HTTP isteğini 403 ile engellerse program Playwright/Chromium ile sayfayı gerçek tarayıcı gibi açmayı dener.
 
 ## Email ayarı
 

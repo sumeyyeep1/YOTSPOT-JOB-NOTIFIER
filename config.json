@@ -1,15 +1,20 @@
 {
-  "site_url": "https://www.yotspot.com/job-search.html",
+  "site_url": "https://www.yotspot.com/job-search.html?ajax=true&keyword=&deptid%5B0%5D=1&positionid%5B0%5D=4&positionid%5B1%5D=34&work_as_team=any&us_flagged_vessel=0&action=Filter+Results&sort=created",
+  "browser_fallback": true,
   "kontrol_araligi": 600,
   "http_timeout": 45,
   "istek_tekrar_sayisi": 3,
   "istek_tekrar_bekleme": 15,
-  "maksimum_ilan": 20,
+  "maksimum_ilan": 15,
   "maksimum_sayfa": 1,
+  "siralama": "date_added_latest_first",
   "email": {
     "aktif": true
   },
   "arama_kriterleri": {
+    "departmanlar": [
+      "Deck"
+    ],
     "pozisyonlar": [
       "Deckhand",
       "Junior Deckhand"
