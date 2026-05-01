@@ -1,0 +1,24 @@
+{
+  "site_url": "https://www.yotspot.com/job-search.html",
+  "kontrol_araligi": 600,
+  "http_timeout": 45,
+  "istek_tekrar_sayisi": 3,
+  "istek_tekrar_bekleme": 15,
+  "maksimum_ilan": 20,
+  "maksimum_sayfa": 1,
+  "email": {
+    "aktif": true
+  },
+  "arama_kriterleri": {
+    "pozisyonlar": [
+      "Deckhand",
+      "Junior Deckhand"
+    ],
+    "tam_pozisyon_eslesmesi": true,
+    "anahtar_kelimeler": [
+      "deckhand"
+    ],
+    "konumlar": [],
+    "sehir": ""
+  }
+}
