@@ -589,8 +589,8 @@ class IsIlaniTakip:
             msg.attach(part)
             
             # SMTP ile gönder
-            with smtplib.SMTP(smtp_server, smtp_port) as server:
-                server.starttls()
+            # SMTP ile gönder (Ağ hatalarını aşmak için Port 465 SSL kullanıyoruz)
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
                 server.login(gonderici_email, gonderici_sifre)
                 server.send_message(msg)
             
