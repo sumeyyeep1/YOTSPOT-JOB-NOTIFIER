@@ -1,48 +1,41 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
 İş İlanı Takip ve Bildirim Sistemi
 Web scraping ile iş ilanlarını takip eder ve yeni ilanlar için bildirim gönderir.
 """
 
-import os
-import sys
-import time
-import json
-import socket
-import smtplib
-import threading
-from datetime import datetime
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-# Senin daha önce kullandığın diğer kütüphaneler (Playwright, bs4 vb. varsa buraya ekli kalsın)
 import requests
 from bs4 import BeautifulSoup
+import json
+import time
+from datetime import datetime
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import hashlib
+import os
 import re
 import subprocess
+import sys
+import threading
 from pathlib import Path
 from urllib.parse import urljoin
-
+import socket
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # =====================================================================
-# 1. IPv6 HATASINI ÇÖZEN SİHİRLİ YAMA (Network is unreachable çözümü)
+# 1. IPv6 HATASINI ÇÖZEN SİHİRLİ YAMA
 # =====================================================================
 eski_getaddrinfo = socket.getaddrinfo
 
 def sadece_ipv4_getaddrinfo(*args, **kwargs):
     cevaplar = eski_getaddrinfo(*args, **kwargs)
-    # Sadece IPv4 (AF_INET) olan bağlantılara izin ver
     return [cevap for cevap in cevaplar if cevap[0] == socket.AF_INET]
 
 socket.getaddrinfo = sadece_ipv4_getaddrinfo
 
-
 # =====================================================================
-# 2. RENDER.COM SAHTE WEB SUNUCUSU (No open ports hatası çözümü)
+# 2. RENDER.COM SAHTE WEB SUNUCUSU
 # =====================================================================
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -51,89 +44,447 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Yotspot Botu Sorunsuz Calisiyor!")
         
-    # Terminalde log kirliliği yapmaması için HTTP loglarını kapatıyoruz
     def log_message(self, format, *args):
         pass
 
 def run_dummy_server():
-    # Render'ın bize atadığı portu alıyoruz, bulamazsa 10000 kullanıyor
     port = int(os.environ.get('PORT', 10000))
     server = HTTPServer(('0.0.0.0', port), DummyHandler)
     print(f"[*] Render sahte web sunucusu {port} portunda baslatildi.")
     server.serve_forever()
 
-
 # =====================================================================
-# 3. ASIL İŞ İLANI TAKİP BOTU SINIFI
+# 3. ASIL İŞ İLANI TAKİP BOTU
 # =====================================================================
 class IsIlaniTakip:
     def __init__(self, config_file="config.json"):
-        # Kendi config yükleme ayarların
-        self.config_file = config_file
-        # ... kendi init kodlarının geri kalanı ...
+        self.env = self.load_env()
+        self.config = self.load_config(config_file)
+        self.gorulmus_ilanlar_file = "gorulmus_ilanlar.json"
+        self.gorulmus_ilanlar = self.load_gorulmus_ilanlar()
 
-    def email_gonder(self, yeni_ilanlar):
-        """Yeni ilanları e-posta ile gönderir."""
-        # Şifreleri Render'ın Environment Variables kısmından çekiyoruz
-        gonderici_email = os.environ.get("EMAIL_SENDER")
-        gonderici_sifre = os.environ.get("EMAIL_PASSWORD")
-        alici_email = os.environ.get("EMAIL_RECIPIENT")
+    def load_env(self, env_file=".env"):
+        env = {}
+        if os.path.exists(env_file):
+            with open(env_file, 'r', encoding='utf-8-sig') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    key, value = line.split('=', 1)
+                    env[key.strip()] = value.strip().strip('"').strip("'")
+        env.update(os.environ)
+        return env
+    
+    def load_config(self, config_file):
+        if os.path.exists(config_file):
+            with open(config_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        else:
+            default_config = {
+                "site_url": "https://www.yotspot.com/job-search.html",
+                "browser_fallback": True,
+                "kontrol_araligi": 600,
+                "http_timeout": 45,
+                "istek_tekrar_sayisi": 3,
+                "istek_tekrar_bekleme": 15,
+                "maksimum_ilan": 15,
+                "maksimum_sayfa": 1,
+                "siralama": "date_added_latest_first",
+                "email": {"aktif": True},
+                "arama_kriterleri": {
+                    "departmanlar": ["Deck"],
+                    "pozisyonlar": ["Deckhand", "Junior Deckhand"],
+                    "tam_pozisyon_eslesmesi": True,
+                    "anahtar_kelimeler": ["deckhand"],
+                    "konumlar": [],
+                    "sehir": ""
+                }
+            }
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, indent=4, ensure_ascii=False)
+            return default_config
+    
+    def load_gorulmus_ilanlar(self):
+        if os.path.exists(self.gorulmus_ilanlar_file):
+            with open(self.gorulmus_ilanlar_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return []
 
-        if not all([gonderici_email, gonderici_sifre, alici_email]):
-            print("[HATA] E-posta ayarları (Environment Variables) eksik!")
-            return
+    def http_session_olustur(self):
+        try:
+            import cloudscraper
+            return cloudscraper.create_scraper()
+        except ImportError:
+            return requests.Session()
+    
+    def save_gorulmus_ilanlar(self):
+        with open(self.gorulmus_ilanlar_file, 'w', encoding='utf-8') as f:
+            json.dump(self.gorulmus_ilanlar, f, indent=4, ensure_ascii=False)
+    
+    def ilan_hash_olustur(self, ilan_baslik, sirket, link=""):
+        ilan_str = f"{ilan_baslik}_{sirket}_{link}"
+        return hashlib.md5(ilan_str.encode()).hexdigest()
+    
+    def ilanlari_cek(self):
+        try:
+            headers = {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/124.0 Safari/537.36'
+                ),
+                'Accept-Language': 'en-US,en;q=0.9,tr;q=0.8'
+            }
+            session = self.http_session_olustur()
+            return self.yotspot_sayfalari_cek(session, headers)
+        except requests.RequestException as e:
+            print(f"İstek hatası: {e}")
+            return None
+        except Exception as e:
+            print(f"Genel hata: {e}")
+            return None
 
-        msg = MIMEMultipart()
-        msg['From'] = gonderici_email
-        msg['To'] = alici_email
-        msg['Subject'] = f"Yotspot: {len(yeni_ilanlar)} Yeni İlan Bulundu!"
+    def yotspot_sayfalari_cek(self, session, headers):
+        ilanlar = []
+        gorulen_linkler = set()
+        gorulen_sayfalar = set()
+        url = self.config['site_url']
+        maksimum_ilan = self.config.get('maksimum_ilan', 300)
+        maksimum_sayfa = self.config.get('maksimum_sayfa', 30)
 
-        # E-posta içeriğini oluştur
-        govde = "Yeni ilanlar bulundu:\n\n"
-        for ilan in yeni_ilanlar:
-            govde += f"- {ilan}\n"
-        
-        msg.attach(MIMEText(govde, 'plain', 'utf-8'))
+        for sayfa_no in range(1, maksimum_sayfa + 1):
+            if not url or url in gorulen_sayfalar:
+                break
+            gorulen_sayfalar.add(url)
+            soup = self.yotspot_sayfa_cek(session, headers, url, sayfa_no)
+            if soup is None:
+                return None if not ilanlar else ilanlar
+
+            ham_kart_sayisi = self.yotspot_ham_ilan_karti_say(soup)
+            sayfa_ilanlari = self.yotspot_ilanlarini_parse_et(soup)
+            yeni_sayfa_ilanlari = 0
+
+            for ilan in sayfa_ilanlari:
+                if ilan['link'] in gorulen_linkler:
+                    continue
+                gorulen_linkler.add(ilan['link'])
+                ilanlar.append(ilan)
+                yeni_sayfa_ilanlari += 1
+                if len(ilanlar) >= maksimum_ilan:
+                    return self.ilanlari_sirala(ilanlar)
+
+            print(f"  Sayfa {sayfa_no}: {ham_kart_sayisi} ham kart, {yeni_sayfa_ilanlari} filtreye uyan aday ilan")
+            url = self.sonraki_sayfa_linki_bul(soup, url)
+
+        return self.ilanlari_sirala(ilanlar)
+
+    def ilanlari_sirala(self, ilanlar):
+        if self.config.get('siralama') != 'date_added_latest_first':
+            return ilanlar
+        return sorted(ilanlar, key=lambda ilan: int(ilan.get('ilan_no') or 0), reverse=True)
+
+    def yotspot_ham_ilan_karti_say(self, soup):
+        sayac = 0
+        for link_elemani in soup.find_all('a', href=True):
+            link_metni = link_elemani.get_text(" ", strip=True)
+            if re.search(r'\bView Job\b', link_metni, re.I):
+                sayac += 1
+        return sayac
+
+    def yotspot_sayfa_cek(self, session, headers, url, sayfa_no):
+        son_hata = None
+        tekrar_sayisi = self.config.get('istek_tekrar_sayisi', 3)
+        tekrar_bekleme = self.config.get('istek_tekrar_bekleme', 15)
+        timeout = self.config.get('http_timeout', 45)
+
+        for deneme in range(1, tekrar_sayisi + 1):
+            try:
+                response = session.get(url, headers=headers, timeout=timeout)
+                if response.status_code == 403:
+                    print("Yotspot HTTP isteğini engelledi (403 Forbidden). Tarayıcı fallback deneniyor...")
+                    return self.yotspot_sayfa_cek_browser(url)
+                response.raise_for_status()
+                return BeautifulSoup(response.content, 'html.parser')
+            except requests.RequestException as e:
+                son_hata = e
+                print(f"Sayfa {sayfa_no} istek denemesi başarısız ({deneme}/{tekrar_sayisi}): {e}")
+                if deneme < tekrar_sayisi:
+                    time.sleep(tekrar_bekleme)
+
+        print(f"İstek hatası: {son_hata}")
+        return None
+
+    def yotspot_sayfa_cek_browser(self, url, browser_kurulum_denendi=False):
+        if not self.config.get('browser_fallback', True):
+            return None
+        try:
+            from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+        except ImportError:
+            print("Playwright kurulu değil.")
+            return None
 
         try:
-            # 465 SSL Portu ile sorunsuz gönderim yapıyoruz
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page(
+                    viewport={'width': 1440, 'height': 1100},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+                )
+                page.goto(url, wait_until='domcontentloaded', timeout=60000)
+                self.yotspot_filtreleri_browserda_uygula(page)
+                page.wait_for_timeout(3000)
+                html = page.content()
+                browser.close()
+                return BeautifulSoup(html, 'html.parser')
+        except PlaywrightTimeoutError as e:
+            print(f"Tarayıcı fallback zaman aşımına uğradı: {e}")
+            return None
+        except Exception as e:
+            print(f"Tarayıcı fallback hatası: {e}")
+            return None
+
+    def yotspot_filtreleri_browserda_uygula(self, page):
+        try:
+            page.get_by_text("Sort", exact=False).click(timeout=5000)
+            page.get_by_text("Date Added (Latest First)", exact=True).click(timeout=5000)
+        except Exception:
+            pass
+        kriterler = self.config.get('arama_kriterleri', {})
+        try:
+            page.get_by_text("Department", exact=True).click(timeout=5000)
+            page.get_by_text("Deck", exact=True).click(timeout=5000)
+        except Exception:
+            pass
+        for pozisyon in kriterler.get('pozisyonlar', []):
+            try:
+                page.get_by_text("Position", exact=True).click(timeout=5000)
+                page.get_by_text(pozisyon, exact=True).click(timeout=5000)
+            except Exception:
+                pass
+
+    def sonraki_sayfa_linki_bul(self, soup, mevcut_url):
+        next_link = soup.find('a', string=re.compile(r'^\s*Next\s*$', re.I))
+        if not next_link:
+            next_link = soup.find('a', attrs={'rel': re.compile(r'next', re.I)})
+        if not next_link or not next_link.get('href'):
+            return None
+        return urljoin(mevcut_url, next_link['href'])
+
+    def yotspot_ilanlarini_parse_et(self, soup):
+        ilanlar = []
+        gorulen_linkler = set()
+        maksimum_ilan = self.config.get('maksimum_ilan', 30)
+
+        for gereksiz in soup(['script', 'style', 'noscript']):
+            gereksiz.decompose()
+
+        for link_elemani in soup.find_all('a', href=True):
+            link_metni = link_elemani.get_text(" ", strip=True).lower()
+            href = link_elemani.get('href', '')
+            if 'view job' not in link_metni and not re.search(r'job|vacanc|position', href, re.I):
+                continue
+            kart = self.yotspot_ilan_karti_bul(link_elemani)
+            if not kart:
+                continue
+            ilan = self.yotspot_ilan_kartini_parse_et(kart, href)
+            if not ilan or ilan['link'] in gorulen_linkler:
+                continue
+            gorulen_linkler.add(ilan['link'])
+            if self.ilan_kriterlere_uyuyor(ilan):
+                ilanlar.append(ilan)
+            if len(ilanlar) >= maksimum_ilan:
+                break
+        return ilanlar
+
+    def yotspot_ilan_karti_bul(self, link_elemani):
+        for parent in link_elemani.parents:
+            if not getattr(parent, 'get_text', None) or parent.name == 'body':
+                break
+            metin = parent.get_text(" ", strip=True)
+            if 25 <= len(metin) <= 2200 and re.search(r'\bView Job\b', metin, re.I) and (re.search(r'#\d+', metin) or re.search(r'Posted|Starting|Permanent|Seasonal|Daywork|Rotational|Temporary', metin, re.I)):
+                return parent
+        return None
+
+    def yotspot_ilan_kartini_parse_et(self, kart, href):
+        satirlar = [s.strip() for s in kart.stripped_strings if s.strip()]
+        satirlar = [s for s in satirlar if s.lower() not in {'view job', 'apply', 'save'}]
+        if not satirlar: return None
+        baslik = self.yotspot_baslik_bul(satirlar)
+        if not baslik: return None
+        
+        link = urljoin(self.config['site_url'], href)
+        ilan_no = self.ilan_numarasi_bul(" ".join(satirlar + [href]))
+        pozisyon_adi = self.pozisyon_adi_temizle(baslik)
+        detaylar = [s for s in satirlar if not self.yotspot_detaydan_cikar(s, baslik, pozisyon_adi)][:8]
+        
+        return {
+            'baslik': baslik,
+            'sirket': 'Yotspot',
+            'link': link,
+            'ilan_no': ilan_no,
+            'konum': self.yotspot_konum_bul(detaylar),
+            'detaylar': detaylar,
+            'yayin_tarihi': next((s for s in detaylar if s.lower().startswith('posted')), ''),
+            'tarih': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+    def yotspot_baslik_bul(self, satirlar):
+        for index, satir in enumerate(satirlar):
+            if re.fullmatch(r'#\d+', satir):
+                pozisyon = self.onceki_pozisyon_satirini_bul(satirlar, index)
+                if pozisyon: return f"{pozisyon} {satir}"
+            if re.search(r'#\d+', satir):
+                return self.yotspot_baslik_temizle(satir)
+        engellenenler = ('starting ', 'posted ', 'permanent', 'seasonal', 'daywork')
+        for satir in satirlar:
+            if not satir.lower().startswith(engellenenler):
+                return self.yotspot_baslik_temizle(satir)
+        return ''
+
+    def onceki_pozisyon_satirini_bul(self, satirlar, index):
+        for aday in reversed(satirlar[:index]):
+            temiz_aday = self.yotspot_baslik_temizle(aday)
+            if not temiz_aday or temiz_aday.lower() in {'view job', 'apply', 'save'}: continue
+            if re.fullmatch(r'#\d+', temiz_aday): continue
+            if temiz_aday.lower().startswith(('starting ', 'posted ')): continue
+            if re.search(r'permanent|seasonal|daywork|rotational|temporary|motor yacht|sailing yacht|support vessel', temiz_aday.lower()): continue
+            return temiz_aday
+        return ''
+
+    def yotspot_baslik_temizle(self, metin):
+        return re.sub(r'^(Featured|New|Updated)\s+', '', metin, flags=re.I).strip()
+
+    def yotspot_detaydan_cikar(self, satir, baslik, pozisyon_adi):
+        temiz_satir = self.yotspot_baslik_temizle(satir)
+        if temiz_satir.lower() in {'new', 'featured', 'updated', 'view job', 'apply', 'save'}: return True
+        if temiz_satir == baslik or temiz_satir == pozisyon_adi: return True
+        if re.fullmatch(r'#\d+', temiz_satir): return True
+        return False
+
+    def ilan_numarasi_bul(self, metin):
+        eslesme = re.search(r'#(\d+)', metin)
+        return eslesme.group(1) if eslesme else ''
+
+    def yotspot_konum_bul(self, detaylar):
+        for detay in detaylar:
+            d_lower = detay.lower()
+            if d_lower in {'new', 'featured', 'updated'} or d_lower.startswith(('starting ', 'posted ', 'permanent', 'seasonal', 'rotational', 'temporary', 'daywork', 'private', 'charter')): continue
+            if any(p in d_lower for p in ('usd', 'eur', 'gbp', '$', '€', '£')) or 'yacht' in d_lower or 'vessel' in d_lower or 'shore based' in d_lower: continue
+            return detay
+        return ''
+    
+    def anahtar_kelime_kontrol(self, metin):
+        anahtar_kelimeler = self.config.get('arama_kriterleri', {}).get('anahtar_kelimeler', [])
+        if not anahtar_kelimeler: return True
+        return any(k.lower() in metin.lower() for k in anahtar_kelimeler)
+
+    def ilan_kriterlere_uyuyor(self, ilan):
+        kriterler = self.config.get('arama_kriterleri', {})
+        if kriterler.get('tam_pozisyon_eslesmesi', False):
+            beklenen_pozisyonlar = {p.strip().lower() for p in kriterler.get('pozisyonlar', []) if p.strip()}
+            if beklenen_pozisyonlar and self.pozisyon_adi_temizle(ilan.get('baslik', '')).lower() not in beklenen_pozisyonlar:
+                return False
+        
+        aranacak_metin = " ".join([ilan.get('baslik', ''), ilan.get('konum', ''), " ".join(ilan.get('detaylar', []))])
+        if not self.anahtar_kelime_kontrol(aranacak_metin): return False
+        
+        konumlar = kriterler.get('konumlar', [])
+        if not konumlar: return True
+        return any(konum.lower() in aranacak_metin.lower() for konum in konumlar)
+
+    def pozisyon_adi_temizle(self, baslik):
+        p = self.yotspot_baslik_temizle(baslik)
+        p = re.sub(r'\s*#\d+.*$', '', p).strip()
+        return re.sub(r'\s+Team/Couple$', '', p, flags=re.I).strip()
+    
+    def yeni_ilan_mi(self, ilan):
+        return self.ilan_hash_olustur(ilan['baslik'], ilan['sirket'], ilan.get('link', '')) not in self.gorulmus_ilanlar
+    
+    def email_gonder(self, ilanlar):
+        if not self.config.get('email', {}).get('aktif', False): return
+        
+        gonderici_email = self.env.get('EMAIL_SENDER', '')
+        gonderici_sifre = self.env.get('EMAIL_PASSWORD', '')
+        alici_email = self.env.get('EMAIL_RECIPIENT', '')
+
+        if not all([gonderici_email, gonderici_sifre, alici_email]):
+            print("Email ayarları eksik: Render Environment Variables içindeki değerleri kontrol edin")
+            return
+        
+        try:
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = f"🔔 {len(ilanlar)} Yeni İş İlanı Bulundu!"
+            msg['From'] = gonderici_email
+            msg['To'] = alici_email
+            
+            html = "<html><body><h2>Yeni İş İlanları</h2><ul>"
+            for ilan in ilanlar:
+                detay_html = "".join(f"<li>{detay}</li>" for detay in ilan.get('detaylar', []))
+                html += f"""
+                <li>
+                    <strong>{ilan['baslik']}</strong><br>
+                    Kaynak: {ilan['sirket']}<br>
+                    Konum: {ilan.get('konum', '-') or '-'}<br>
+                    İlan No: {ilan.get('ilan_no', '-') or '-'}<br>
+                    <ul>{detay_html}</ul>
+                    <a href="{ilan['link']}">İlanı Görüntüle</a><br>
+                    Kontrol Tarihi: {ilan['tarih']}
+                </li><br>
+                """
+            html += "</ul></body></html>"
+            msg.attach(MIMEText(html, 'html'))
+            
+            # Port 465 SSL kullanarak ağ hatalarını önlüyoruz
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
                 server.login(gonderici_email, gonderici_sifre)
                 server.send_message(msg)
-            print("✅ E-posta başarıyla gönderildi!")
+            
+            print(f"✉️  Email başarıyla gönderildi: {len(ilanlar)} ilan")
         except Exception as e:
-            print(f"❌ E-posta gönderme hatası: {e}")
-
-    def ilanlari_cek(self):
-        """Playwright ile Yotspot'a girip ilanları çeken fonksiyon"""
-        # =========================================================
-        # KENDİ PLAYWRIGHT TARAMA KODLARINI BURAYA YAPIŞTIR
-        # =========================================================
-        pass
+            print(f"Email gönderme hatası: {e}")
 
     def calistir(self):
         print("🚀 İş İlanı Takip Sistemi Başlatıldı")
-        # Kendi döngün (örneğin while True: ilanlari_cek() ... time.sleep(600))
-        # =========================================================
-        # KENDİ DÖNGÜ KODLARINI BURAYA YAPIŞTIR
-        # =========================================================
-        pass
+        print(f"📍 Site: {self.config['site_url']}")
+        print(f"⏱️  Kontrol Aralığı: {self.config['kontrol_araligi']} saniye")
+        
+        while True:
+            try:
+                print(f"\n⏰ Kontrol ediliyor... {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                ilanlar = self.ilanlari_cek()
+                
+                if ilanlar is None:
+                    print("❌ Yotspot bağlantısı kurulamadı; sonraki kontrolde tekrar denenecek")
+                elif not ilanlar:
+                    print("ℹ️  Deckhand kriterine uyan ilan bulunamadı")
+                else:
+                    print(f"📋 Bu kontrolde {len(ilanlar)} aday ilan bulundu")
+                    yeni_ilanlar = [i for i in ilanlar if self.yeni_ilan_mi(i)]
+                    
+                    if yeni_ilanlar:
+                        print(f"🆕 {len(yeni_ilanlar)} YENİ İLAN BULUNDU!")
+                        self.email_gonder(yeni_ilanlar)
+                        
+                        for ilan in yeni_ilanlar:
+                            self.gorulmus_ilanlar.append(self.ilan_hash_olustur(ilan['baslik'], ilan['sirket'], ilan.get('link', '')))
+                        self.save_gorulmus_ilanlar()
+                    else:
+                        print(f"ℹ️  Yeni ilan yok.")
+                
+                print(f"⏳ Sonraki kontrol {self.config['kontrol_araligi']} saniye sonra...")
+                time.sleep(self.config['kontrol_araligi'])
+                
+            except Exception as e:
+                print(f"❌ Hata oluştu: {e}")
+                time.sleep(60)
 
     def test_et(self):
         print("Test modu çalışıyor...")
-        pass
 
-
-# =====================================================================
-# 4. SİSTEMİN BAŞLATILMA NOKTASI
-# =====================================================================
 if __name__ == "__main__":
-    # Render fişi çekmesin diye sahte sunucuyu arka planda (Thread) çalıştırıyoruz
     threading.Thread(target=run_dummy_server, daemon=True).start()
-
-    # Asıl botumuzu başlatıyoruz
     takip = IsIlaniTakip()
-    
     if "--test" in sys.argv:
         takip.test_et()
     else:
