@@ -402,22 +402,19 @@ class IsIlaniTakip:
         return self.ilan_hash_olustur(ilan['baslik'], ilan['sirket'], ilan.get('link', '')) not in self.gorulmus_ilanlar
     
     def email_gonder(self, ilanlar):
+        """Email ile bildirim gönder (Brevo API kullanarak, port engellerini %100 aşar)"""
         if not self.config.get('email', {}).get('aktif', False): return
         
+        api_key = self.env.get('BREVO_API_KEY')
         gonderici_email = self.env.get('EMAIL_SENDER', '')
-        gonderici_sifre = self.env.get('EMAIL_PASSWORD', '')
         alici_email = self.env.get('EMAIL_RECIPIENT', '')
 
-        if not all([gonderici_email, gonderici_sifre, alici_email]):
-            print("Email ayarları eksik: Render Environment Variables içindeki değerleri kontrol edin")
+        if not all([api_key, gonderici_email, alici_email]):
+            print("❌ Email ayarları eksik: Render Environment Variables kısmına BREVO_API_KEY ekleyin.")
             return
         
         try:
-            msg = MIMEMultipart('alternative')
-            msg['Subject'] = f"🔔 {len(ilanlar)} Yeni İş İlanı Bulundu!"
-            msg['From'] = gonderici_email
-            msg['To'] = alici_email
-            
+            # E-posta içeriği oluşturuluyor
             html = "<html><body><h2>Yeni İş İlanları</h2><ul>"
             for ilan in ilanlar:
                 detay_html = "".join(f"<li>{detay}</li>" for detay in ilan.get('detaylar', []))
@@ -433,16 +430,30 @@ class IsIlaniTakip:
                 </li><br>
                 """
             html += "</ul></body></html>"
-            msg.attach(MIMEText(html, 'html'))
             
-            # Port 465 SSL kullanarak ağ hatalarını önlüyoruz
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(gonderici_email, gonderici_sifre)
-                server.send_message(msg)
+            # Normal HTTP üzerinden Render'ın engelleyemeyeceği şekilde gönderiyoruz
+            url = "https://api.brevo.com/v3/smtp/email"
+            headers = {
+                "accept": "application/json",
+                "api-key": api_key,
+                "content-type": "application/json"
+            }
+            payload = {
+                "sender": {"name": "Yotspot Bot", "email": gonderici_email},
+                "to": [{"email": alici_email}],
+                "subject": f"🔔 {len(ilanlar)} Yeni İş İlanı Bulundu!",
+                "htmlContent": html
+            }
             
-            print(f"✉️  Email başarıyla gönderildi: {len(ilanlar)} ilan")
+            response = requests.post(url, json=payload, headers=headers)
+            
+            if response.status_code in [200, 201]:
+                print(f"✉️  Email başarıyla gönderildi: {len(ilanlar)} ilan")
+            else:
+                print(f"❌ Email API hatası: {response.text}")
+                
         except Exception as e:
-            print(f"Email gönderme hatası: {e}")
+            print(f"❌ Email gönderme hatası: {e}")
 
     def calistir(self):
         print("🚀 İş İlanı Takip Sistemi Başlatıldı")
